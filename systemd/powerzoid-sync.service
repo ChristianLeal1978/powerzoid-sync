@@ -1,0 +1,22 @@
+[Unit]
+Description=PowerZoid Sync — Daemon de sincronización Git
+Documentation=https://github.com/ChristianLeal1978/powerzoid-sync
+After=network-online.target graphical-session.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/powerzoid-sync-daemon.py
+Restart=on-failure
+RestartSec=15
+
+# Proporciona el agente SSH de GNOME Keyring aunque systemd no herede
+# la variable de sesión de escritorio
+Environment=SSH_AUTH_SOCK=%t/keyring/ssh
+
+# Evita que el daemon acumule demasiado output en el journal
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
