@@ -11,6 +11,7 @@ Escribe log en ~/.local/share/git-sync/sync.log
 
 import json
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -34,6 +35,22 @@ SYNC_INTERVAL_SECONDS = 30 * 60   # 30 minutos
 INITIAL_DELAY_SECONDS = 120        # 2 minutos tras inicio (da tiempo al keyring)
 GITHUB_USER           = "ChristianLeal1978"
 
+# Carpetas de ~/Proyectos reemplazadas por su equivalente powerzoid-*
+# (claude-usage-extension → powerzoid-claude, ram-monitor-gnome → powerzoid-memory,
+# whatsapp-sidebar → powerzoid-messenger, spotify-now-playing-gnome → powerzoid-music).
+# Sus repos de GitHub siguen existiendo, así que además de borrarlas si aparecen
+# hay que excluirlas del auto-clone de "repos en GitHub no presentes localmente".
+STALE_PROJECT_DIRS: list[str] = [
+    "claude-usage-extension",
+    "ram-monitor-gnome",
+    "whatsapp-sidebar",
+    "spotify-now-playing-gnome",
+]
+# Datos de apps asociados a esas carpetas que tampoco deben persistir.
+STALE_PATHS: list[Path] = [
+    HOME / ".config" / "whatsapp-sidebar",
+]
+
 # ─────────────────────────────────────────────
 # Estado global
 # ─────────────────────────────────────────────
@@ -45,6 +62,7 @@ _status: dict = {
     "no_git":      [],       # carpetas sin .git
     "no_remote":   [],       # repos sin remote configurado
     "github_only": [],       # repos en GitHub que no se pudieron clonar
+    "pruned":      [],       # carpetas/rutas obsoletas eliminadas en esta sync
 }
 _lock              = threading.Lock()
 _sync_in_progress  = False
@@ -180,6 +198,33 @@ def local_remote_repo_names(base: Path | None = None) -> set[str]:
 
 
 # ─────────────────────────────────────────────
+# Limpieza de carpetas descontinuadas
+# ─────────────────────────────────────────────
+
+def prune_stale(proyectos: Path) -> list[str]:
+    """
+    Elimina carpetas de proyectos y datos de apps que quedaron obsoletos
+    tras renombrar un proyecto a powerzoid-*. Se corre en cada sync para
+    que un equipo que todavía no se había limpiado (p.ej. el de la
+    oficina) quede al día automáticamente. Idempotente: si ya no existen,
+    no hace nada.
+    """
+    removed: list[str] = []
+    for name in STALE_PROJECT_DIRS:
+        path = proyectos / name
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+            removed.append(str(path))
+            log(f"  [prune] Carpeta obsoleta eliminada: {path}")
+    for path in STALE_PATHS:
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+            removed.append(str(path))
+            log(f"  [prune] Datos obsoletos eliminados: {path}")
+    return removed
+
+
+# ─────────────────────────────────────────────
 # Sincronización de un repo individual
 # ─────────────────────────────────────────────
 
@@ -245,6 +290,7 @@ def do_sync() -> None:
             "no_git":      [],
             "no_remote":   [],
             "github_only": [],
+            "pruned":      [],
         })
     save_status()
 
@@ -252,6 +298,7 @@ def do_sync() -> None:
     errors:       list  = []
     no_git:       list  = []
     no_remote:    list  = []
+    pruned:       list  = []
     final_state         = "idle"
 
     try:
@@ -259,6 +306,9 @@ def do_sync() -> None:
         cfg_now   = read_config()
         proyectos = Path(cfg_now.get('folder', str(PROYECTOS))).expanduser()
         proyectos.mkdir(parents=True, exist_ok=True)
+
+        # ── 0. Podar carpetas descontinuadas ──────────────────────────────
+        pruned = prune_stale(proyectos)
 
         # ── 1. Sincronizar repos locales ──────────────────────────────────
         for repo_path in sorted(proyectos.iterdir()):
@@ -297,7 +347,7 @@ def do_sync() -> None:
             local_folders  = {p.name for p in proyectos.iterdir() if p.is_dir()}
 
             for repo_name in gh_repos:
-                if repo_name in skip_set:
+                if repo_name in skip_set or repo_name in STALE_PROJECT_DIRS:
                     continue
                 # ¿Ya está clonado (con cualquier nombre de carpeta)?
                 if repo_name in already_cloned:
@@ -333,7 +383,8 @@ def do_sync() -> None:
 
     log(f"Sincronización completada — Estado: {final_state}")
     log(f"  Repos: {len(repos_state)} · Errores: {len(errors)} "
-        f"· Sin remoto: {len(no_remote)} · Solo GitHub: {len(github_only)}")
+        f"· Sin remoto: {len(no_remote)} · Solo GitHub: {len(github_only)} "
+        f"· Podadas: {len(pruned)}")
 
     with _lock:
         _status.update({
@@ -344,6 +395,7 @@ def do_sync() -> None:
             "no_git":      no_git,
             "no_remote":   no_remote,
             "github_only": github_only,
+            "pruned":      pruned,
         })
     save_status()
 

@@ -87,6 +87,23 @@ Al iniciar sesión, la extensión aparecerá en la barra izquierda. La primera s
 
 ---
 
+## Carpetas descontinuadas
+
+Al principio de cada sync, el daemon borra automáticamente las carpetas de proyectos que fueron renombradas a `powerzoid-*` pero cuyo repo de GitHub original sigue existiendo (por lo que, sin esto, el paso de "clonar repos de GitHub no presentes localmente" las volvería a traer):
+
+| Carpeta obsoleta | Reemplazada por |
+|---|---|
+| `claude-usage-extension` | `powerzoid-claude` |
+| `ram-monitor-gnome` | `powerzoid-memory` |
+| `whatsapp-sidebar` | `powerzoid-messenger` |
+| `spotify-now-playing-gnome` | `powerzoid-music` |
+
+También borra `~/.config/whatsapp-sidebar` (sesión/caché de WhatsApp Web de la versión vieja).
+
+Esta lista vive en `STALE_PROJECT_DIRS` / `STALE_PATHS` al inicio de `daemon/powerzoid-sync-daemon.py`. Como el daemon corre desde la copia instalada en `~/.local/bin/`, un equipo que ya tenga el servicio corriendo necesita **reinstalar** (`bash install.sh`) después de traer este cambio para que la poda tome efecto — el `git pull` de este repo por sí solo no actualiza el daemon en ejecución.
+
+---
+
 ## Menú de la extensión
 
 Haciendo clic en el indicador:
