@@ -51,6 +51,15 @@ STALE_PATHS: list[Path] = [
     HOME / ".config" / "whatsapp-sidebar",
 ]
 
+# Auto-actualización: dónde vive el propio proyecto dentro de ~/Proyectos
+# (se sincroniza como cualquier otro repo) y dónde quedan instalados sus
+# archivos, para poder compararlos y reinstalar cuando difieran.
+REPO_NAME         = "powerzoid-sync"
+EXTENSION_UUID    = "powerzoid-sync@cleal.cl"
+INSTALLED_DAEMON  = HOME / ".local/bin/powerzoid-sync-daemon.py"
+INSTALLED_EXT_DIR = HOME / ".local/share/gnome-shell/extensions" / EXTENSION_UUID
+INSTALLED_SERVICE = HOME / ".config/systemd/user/powerzoid-sync.service"
+
 # ─────────────────────────────────────────────
 # Estado global
 # ─────────────────────────────────────────────
@@ -225,6 +234,102 @@ def prune_stale(proyectos: Path) -> list[str]:
 
 
 # ─────────────────────────────────────────────
+# Auto-actualización del propio daemon
+# ─────────────────────────────────────────────
+
+def _files_differ(src: Path, dst: Path) -> bool:
+    if not dst.exists():
+        return True
+    try:
+        return src.read_bytes() != dst.read_bytes()
+    except Exception:
+        return True
+
+
+def _repo_ahead_of_install(repo_dir: Path) -> bool:
+    daemon_src = repo_dir / "daemon" / "powerzoid-sync-daemon.py"
+    if not daemon_src.is_file():
+        return False
+    if _files_differ(daemon_src, INSTALLED_DAEMON):
+        return True
+
+    ext_src = repo_dir / "extension" / EXTENSION_UUID
+    if ext_src.is_dir():
+        for f in ext_src.iterdir():
+            if f.is_file() and _files_differ(f, INSTALLED_EXT_DIR / f.name):
+                return True
+
+    service_src = repo_dir / "systemd" / "powerzoid-sync.service"
+    if service_src.is_file() and _files_differ(service_src, INSTALLED_SERVICE):
+        return True
+
+    return False
+
+
+def self_update(proyectos: Path) -> bool:
+    """
+    Compara el repo powerzoid-sync (ya sincronizado en el paso 1 de este
+    mismo ciclo) con lo instalado en ~/.local/bin, la extensión y la
+    unidad systemd. Si algo cambió, reinstala y reinicia el servicio.
+
+    El reinicio se dispara con `systemd-run` en un scope aparte: si se
+    hiciera con un `systemctl --user restart` normal desde este mismo
+    proceso, systemd mataría todo el cgroup del servicio -incluida esta
+    misma copia de archivos a medio terminar- antes de completarla.
+
+    Devuelve True si se disparó una reinstalación (el proceso morirá en
+    los próximos segundos).
+    """
+    repo_dir = proyectos / REPO_NAME
+    if not _repo_ahead_of_install(repo_dir):
+        return False
+
+    log("  [self-update] Nueva versión en el repo — reinstalando...")
+    try:
+        INSTALLED_DAEMON.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(repo_dir / "daemon" / "powerzoid-sync-daemon.py", INSTALLED_DAEMON)
+        INSTALLED_DAEMON.chmod(0o755)
+
+        ext_src = repo_dir / "extension" / EXTENSION_UUID
+        if ext_src.is_dir():
+            INSTALLED_EXT_DIR.mkdir(parents=True, exist_ok=True)
+            for f in ext_src.iterdir():
+                if f.is_file():
+                    shutil.copy2(f, INSTALLED_EXT_DIR / f.name)
+
+        service_src = repo_dir / "systemd" / "powerzoid-sync.service"
+        if service_src.is_file():
+            INSTALLED_SERVICE.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(service_src, INSTALLED_SERVICE)
+            run("systemctl --user daemon-reload")
+    except Exception as e:
+        log(f"  [self-update] Error copiando archivos, se aborta: {e}")
+        return False
+
+    # Recarga la extensión en caliente (no requiere logout: solo hace
+    # falta para UUIDs que el shell nunca vio antes).
+    try:
+        run(f"gnome-extensions disable {EXTENSION_UUID}")
+        run(f"gnome-extensions enable {EXTENSION_UUID}")
+    except Exception:
+        pass
+
+    log("  [self-update] Archivos actualizados, reiniciando servicio...")
+    try:
+        subprocess.Popen(
+            ["systemd-run", "--user", "--quiet", "--",
+             "systemctl", "--user", "restart", "powerzoid-sync.service"],
+            env=ssh_env(),
+            start_new_session=True,
+        )
+    except Exception as e:
+        log(f"  [self-update] Error disparando el reinicio: {e}")
+        return False
+
+    return True
+
+
+# ─────────────────────────────────────────────
 # Sincronización de un repo individual
 # ─────────────────────────────────────────────
 
@@ -334,44 +439,52 @@ def do_sync() -> None:
             else:
                 log(f"  [{repo_path.name}] ✓ sincronizado")
 
-        # ── 2. Repos en GitHub no presentes localmente ────────────────────
-        token    = cfg_now.get("token", "").strip()
-        skip_raw = cfg_now.get("skip_repos", "")
-        skip_set = {s.strip() for s in skip_raw.split(",") if s.strip()}
+        # ── 1.5 Auto-actualización del propio daemon ───────────────────────
+        # El repo powerzoid-sync ya quedó al día en el paso 1; si trae una
+        # versión distinta a la instalada, reinstala y reinicia el servicio.
+        # El resto de este ciclo (paso 2) se salta: el proceso morirá en
+        # breve y el próximo ciclo lo retoma con el binario nuevo.
         github_only: list = []
+        updated = self_update(proyectos)
 
-        if token:
-            log("  [GitHub] Consultando repositorios via API...")
-            gh_repos       = github_repos(token)
-            already_cloned = local_remote_repo_names(proyectos)
-            local_folders  = {p.name for p in proyectos.iterdir() if p.is_dir()}
+        # ── 2. Repos en GitHub no presentes localmente ────────────────────
+        if not updated:
+            token    = cfg_now.get("token", "").strip()
+            skip_raw = cfg_now.get("skip_repos", "")
+            skip_set = {s.strip() for s in skip_raw.split(",") if s.strip()}
 
-            for repo_name in gh_repos:
-                if repo_name in skip_set or repo_name in STALE_PROJECT_DIRS:
-                    continue
-                # ¿Ya está clonado (con cualquier nombre de carpeta)?
-                if repo_name in already_cloned:
-                    continue
-                # ¿Existe carpeta con ese mismo nombre?
-                if repo_name in local_folders:
-                    continue
+            if token:
+                log("  [GitHub] Consultando repositorios via API...")
+                gh_repos       = github_repos(token)
+                already_cloned = local_remote_repo_names(proyectos)
+                local_folders  = {p.name for p in proyectos.iterdir() if p.is_dir()}
 
-                log(f"  [GitHub] '{repo_name}' falta localmente — clonando...")
-                code, out = run(
-                    f"git clone git@github.com:{GITHUB_USER}/{repo_name}.git {repo_name}",
-                    cwd=proyectos,
-                    timeout=120,
-                )
-                if code == 0:
-                    log(f"  [GitHub] '{repo_name}' clonado ✓")
-                    repos_state[repo_name] = {"state": "cloned"}
-                    local_folders.add(repo_name)
-                    already_cloned.add(repo_name)
-                else:
-                    log(f"  [GitHub] Error clonando '{repo_name}': {out[:150]}")
-                    github_only.append(repo_name)
-        else:
-            log("  [GitHub] Sin token en config — sync solo local")
+                for repo_name in gh_repos:
+                    if repo_name in skip_set or repo_name in STALE_PROJECT_DIRS:
+                        continue
+                    # ¿Ya está clonado (con cualquier nombre de carpeta)?
+                    if repo_name in already_cloned:
+                        continue
+                    # ¿Existe carpeta con ese mismo nombre?
+                    if repo_name in local_folders:
+                        continue
+
+                    log(f"  [GitHub] '{repo_name}' falta localmente — clonando...")
+                    code, out = run(
+                        f"git clone git@github.com:{GITHUB_USER}/{repo_name}.git {repo_name}",
+                        cwd=proyectos,
+                        timeout=120,
+                    )
+                    if code == 0:
+                        log(f"  [GitHub] '{repo_name}' clonado ✓")
+                        repos_state[repo_name] = {"state": "cloned"}
+                        local_folders.add(repo_name)
+                        already_cloned.add(repo_name)
+                    else:
+                        log(f"  [GitHub] Error clonando '{repo_name}': {out[:150]}")
+                        github_only.append(repo_name)
+            else:
+                log("  [GitHub] Sin token en config — sync solo local")
 
     except Exception as e:
         log(f"  [Sync] Error inesperado: {e}")
