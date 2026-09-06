@@ -184,6 +184,19 @@ def github_repos(token: str) -> list[str]:
     return names
 
 
+def _repo_name_from_url(url: str) -> str:
+    """Extrae el nombre del repo de una URL SSH o HTTPS de GitHub.
+    SSH:   git@github.com:USER/REPO.git
+    HTTPS: https://github.com/USER/REPO.git"""
+    part = url.strip().rstrip("/")
+    if part.endswith(".git"):
+        part = part[:-4]
+    name = part.split("/")[-1].split(":")[-1]
+    if "/" in name:
+        name = name.split("/")[-1]
+    return name
+
+
 def local_remote_repo_names(base: Path | None = None) -> set[str]:
     """
     Devuelve el conjunto de nombres de repo en GitHub que ya están clonados
@@ -200,17 +213,7 @@ def local_remote_repo_names(base: Path | None = None) -> set[str]:
         code, url = run("git remote get-url origin", cwd=d)
         if code != 0:
             continue
-        # Extrae nombre del repo de la URL SSH o HTTPS
-        # SSH:  git@github.com:USER/REPO.git
-        # HTTPS: https://github.com/USER/REPO.git
-        url = url.strip()
-        part = url.rstrip("/")
-        if part.endswith(".git"):
-            part = part[:-4]
-        repo_name = part.split("/")[-1].split(":")[-1]
-        if "/" in repo_name:
-            repo_name = repo_name.split("/")[-1]
-        names.add(repo_name)
+        names.add(_repo_name_from_url(url))
     return names
 
 
@@ -701,6 +704,20 @@ def do_sync() -> None:
         # ── 0. Podar carpetas descontinuadas ──────────────────────────────
         pruned = prune_stale(proyectos)
 
+        # El repo de secretos (powerzoid-secrets) vive aparte, en
+        # SECRETS_LOCAL_REPO — nunca debe tratarse como un proyecto más.
+        # Si el paso 2 de un ciclo anterior lo clonó por error en
+        # ~/Proyectos (por ser un repo real del usuario en GitHub), se
+        # elimina acá antes de que el paso 1 intente sincronizarlo.
+        secrets_repo_name = _repo_name_from_url(
+            cfg_now.get("secrets_repo", "").strip() or DEFAULT_SECRETS_REPO
+        )
+        stray_secrets_dir = proyectos / secrets_repo_name
+        if stray_secrets_dir.is_dir() and (stray_secrets_dir / ".git").exists():
+            shutil.rmtree(stray_secrets_dir, ignore_errors=True)
+            pruned.append(str(stray_secrets_dir))
+            log(f"  [prune] Repo de secretos clonado por error en Proyectos, eliminado: {stray_secrets_dir}")
+
         # ── 1. Sincronizar repos locales ──────────────────────────────────
         for repo_path in sorted(proyectos.iterdir()):
             if not repo_path.is_dir():
@@ -746,7 +763,8 @@ def do_sync() -> None:
                 local_folders  = {p.name for p in proyectos.iterdir() if p.is_dir()}
 
                 for repo_name in gh_repos:
-                    if repo_name in skip_set or repo_name in STALE_PROJECT_DIRS:
+                    if (repo_name in skip_set or repo_name in STALE_PROJECT_DIRS
+                            or repo_name == secrets_repo_name):
                         continue
                     # ¿Ya está clonado (con cualquier nombre de carpeta)?
                     if repo_name in already_cloned:
