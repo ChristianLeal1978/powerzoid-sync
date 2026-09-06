@@ -19,6 +19,10 @@ const CONFIG_DIR = GLib.build_filenamev([
     GLib.get_home_dir(), '.config', 'powerzoid-sync',
 ]);
 const DEFAULT_FOLDER = GLib.build_filenamev([GLib.get_home_dir(), 'Proyectos']);
+const AGE_IDENTITY_PATH = GLib.build_filenamev([
+    GLib.get_home_dir(), '.config', 'powerzoid-sync', 'age-identity.txt',
+]);
+const DEFAULT_SECRETS_REPO = 'git@github.com:ChristianLeal1978/powerzoid-secrets.git';
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -118,6 +122,50 @@ export default class SyncPreferences extends ExtensionPreferences {
         });
         advGroup.add(skipHintRow);
 
+        // ── Grupo: Secretos (.env.local) ────────────────────────────────────
+        const secretsGroup = new Adw.PreferencesGroup({
+            title: 'Secretos (.env.local)',
+            description:
+                'Sincroniza los .env.local de cada proyecto entre tus equipos, ' +
+                'cifrados con age, vía un repo Git privado aparte de los de proyecto.\n' +
+                'Si una misma clave difiere entre equipos, gana el archivo modificado ' +
+                'más recientemente; las claves que solo existen en un lado se agregan al otro.',
+        });
+        page.add(secretsGroup);
+
+        this._envSyncRow = new Adw.SwitchRow({
+            title:    'Sincronizar .env.local entre equipos',
+            active:   ['1', 'true', 'si', 'sí', 'yes'].includes((cfg.env_sync || '').toLowerCase()),
+        });
+        secretsGroup.add(this._envSyncRow);
+
+        this._secretsRepoRow = new Adw.EntryRow({
+            title: 'Repo Git privado de secretos',
+            text:  cfg.secrets_repo || DEFAULT_SECRETS_REPO,
+            show_apply_button: true,
+        });
+        secretsGroup.add(this._secretsRepoRow);
+
+        const identityRow = new Adw.ActionRow({
+            title:    'Identidad age de este equipo',
+            subtitle: `${AGE_IDENTITY_PATH}\n` +
+                'Se genera sola en la primera sync. Cópiala a mano (misma ruta) a tus ' +
+                'otros equipos para que puedan descifrarse entre sí — nunca se sube al repo.',
+        });
+        identityRow.subtitle_lines = 3;
+        const copyPathBtn = new Gtk.Button({
+            icon_name:    'edit-copy-symbolic',
+            valign:       Gtk.Align.CENTER,
+            tooltip_text: 'Copiar ruta al portapapeles',
+            css_classes:  ['flat'],
+        });
+        copyPathBtn.connect('clicked', () => {
+            this._window.get_clipboard().set(AGE_IDENTITY_PATH);
+            this._window.add_toast(new Adw.Toast({ title: 'Ruta copiada', timeout: 2 }));
+        });
+        identityRow.add_suffix(copyPathBtn);
+        secretsGroup.add(identityRow);
+
         // ── Botón de guardar ──────────────────────────────────────────────
         const saveGroup = new Adw.PreferencesGroup();
         page.add(saveGroup);
@@ -132,6 +180,8 @@ export default class SyncPreferences extends ExtensionPreferences {
         this._folderRow.connect('apply', () => this._save());
         this._tokenRow.connect('apply',  () => this._save());
         this._skipRow.connect('apply',   () => this._save());
+        this._secretsRepoRow.connect('apply', () => this._save());
+        this._envSyncRow.connect('notify::active', () => this._save());
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -166,9 +216,11 @@ export default class SyncPreferences extends ExtensionPreferences {
 
     _save() {
         const cfg = {
-            folder:     this._folderRow.text.trim(),
-            token:      this._tokenRow.text.trim(),
-            skip_repos: this._skipRow.text.trim(),
+            folder:       this._folderRow.text.trim(),
+            token:        this._tokenRow.text.trim(),
+            skip_repos:   this._skipRow.text.trim(),
+            secrets_repo: this._secretsRepoRow.text.trim(),
+            env_sync:     this._envSyncRow.active ? '1' : '0',
         };
 
         const ok = this._writeConfig(cfg);
@@ -230,9 +282,11 @@ export default class SyncPreferences extends ExtensionPreferences {
                 '',
             ];
 
-            if (cfg.folder)     lines.push(`folder=${cfg.folder}`);
-            if (cfg.token)      lines.push(`token=${cfg.token}`);
-            if (cfg.skip_repos) lines.push(`skip_repos=${cfg.skip_repos}`);
+            if (cfg.folder)       lines.push(`folder=${cfg.folder}`);
+            if (cfg.token)        lines.push(`token=${cfg.token}`);
+            if (cfg.skip_repos)   lines.push(`skip_repos=${cfg.skip_repos}`);
+            if (cfg.secrets_repo) lines.push(`secrets_repo=${cfg.secrets_repo}`);
+            if (cfg.env_sync)     lines.push(`env_sync=${cfg.env_sync}`);
             lines.push('');
 
             const file = Gio.File.new_for_path(CONFIG_PATH);

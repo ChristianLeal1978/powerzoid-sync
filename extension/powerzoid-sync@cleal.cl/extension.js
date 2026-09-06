@@ -316,6 +316,10 @@ class SyncIndicator extends PanelMenu.Button {
             this._addInfo(`📥 No clonados de GitHub (${ghOnly.length}):`, true);
             ghOnly.forEach(n => this._addInfo(`     ${n}`));
         }
+
+        const envSynced = status.env_synced || [];
+        if (envSynced.length > 0)
+            this._addInfo(`🔐 .env.local fusionados (${envSynced.length}): ${envSynced.join(', ')}`);
     }
 
     _addInfo(text, bold = false) {

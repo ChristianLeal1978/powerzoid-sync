@@ -1,6 +1,6 @@
 # PowerZoid Sync — GNOME Shell Extension
 
-Descarga automática (solo lectura) de los repos dentro de `~/Proyectos/` desde GitHub. El daemon **nunca hace commit ni push**: solo trae (`fetch` + fast-forward) los cambios que ya existen en GitHub hacia el equipo local. Indicador visual en tiempo real en la barra superior.
+Descarga automática (solo lectura) de los repos dentro de `~/Proyectos/` desde GitHub. Para los repos de proyecto el daemon **nunca hace commit ni push**: solo trae (`fetch` + fast-forward) los cambios que ya existen en GitHub hacia el equipo local. Opcionalmente también sincroniza los `.env.local` de cada proyecto entre equipos, cifrados, a través de un repo Git privado aparte (ver [Secretos](#secretos-envlocal-entre-equipos) — ese repo sí recibe commit/push del propio daemon). Indicador visual en tiempo real en la barra superior.
 
 ```
 🟢 Sync   ← todo sincronizado
@@ -22,8 +22,9 @@ fedora-casa ──────────── GitHub ────────
 
 - **Daemon Python** (`~/.local/bin/powerzoid-sync-daemon.py`): descarga cambios cada 30 minutos, expone HTTP en `localhost:6790`.
 - **Extensión GNOME**: consulta el daemon cada 5 segundos y muestra el estado.
-- **GitHub** es la única fuente de verdad: el daemon solo lee de ahí, nunca escribe.
-- Los cambios locales (commits, push) siguen siendo responsabilidad manual del usuario en cada repo.
+- **GitHub** es la única fuente de verdad para los repos de proyecto: el daemon solo lee de ahí, nunca escribe.
+- Los cambios locales (commits, push) de los repos de proyecto siguen siendo responsabilidad manual del usuario.
+- Los `.env.local` son la única excepción: viven en un repo Git privado aparte (`powerzoid-secrets`) que el daemon sí escribe (commit + push), siempre cifrados con `age`.
 
 ---
 
@@ -124,6 +125,60 @@ PowerZoid Sync
 
 ---
 
+## Secretos (`.env.local`) entre equipos
+
+Sincroniza los `.env.local` de cada proyecto entre tus equipos (ej. casa ↔ oficina), fusionando por `key` en vez de sobrescribir el archivo completo:
+
+- Si una misma `key` tiene valores distintos en cada equipo, gana el valor del archivo **modificado más recientemente**.
+- Si una `key` existe en un lado y no en el otro, se agrega al otro — ambos quedan con el mismo contenido.
+- Nunca se sube nada en texto plano: cada `.env.local` se cifra con [`age`](https://github.com/FiloSottile/age) antes de salir del equipo, hacia un **repo Git privado aparte** (nunca uno de tus proyectos) que solo contiene blobs cifrados.
+
+### Setup (una vez por cuenta)
+
+**1. Instalar `age`** en cada equipo:
+
+```bash
+sudo dnf install age
+```
+
+**2. Crear el repo privado de secretos** (una sola vez, desde cualquier equipo):
+
+```bash
+gh repo create powerzoid-secrets --private
+```
+
+**3. Activar la sincronización** en Configuración de la extensión (clic derecho en el indicador → ⚙ Configuración… → sección "Secretos (.env.local)"):
+   - Activa **"Sincronizar .env.local entre equipos"**.
+   - Verifica que el campo **"Repo Git privado de secretos"** apunte al repo creado en el paso 2 (por defecto `git@github.com:ChristianLeal1978/powerzoid-secrets.git`).
+   - Guarda. En la primera sync, el daemon genera una **identidad `age`** en `~/.config/powerzoid-sync/age-identity.txt` y lo indica en el log.
+
+**4. Copiar la identidad `age` a tus otros equipos** (paso manual, igual que ya haces con la llave SSH):
+
+```bash
+scp ~/.config/powerzoid-sync/age-identity.txt otro-equipo:~/.config/powerzoid-sync/age-identity.txt
+```
+
+   Repite los pasos 1 y 3 en cada equipo adicional, usando la **misma identidad copiada** (no generes una nueva ahí, o no podrá descifrar lo que suban los demás equipos).
+
+> ⚠️ El archivo `age-identity.txt` es una clave privada: **nunca se sube al repo `powerzoid-secrets`** ni a ningún otro repo. Trátalo como tratarías tu llave SSH privada.
+
+### Cómo funciona por dentro
+
+Por cada proyecto con `.env.local`, el repo `powerzoid-secrets` guarda:
+
+```
+<proyecto>.env.local.age   ← contenido cifrado
+<proyecto>.meta.json       ← solo { "mtime": ... }, sin datos sensibles
+```
+
+En cada sync, el daemon descifra la versión remota, la compara por `key` contra la local (usando el `mtime` del archivo local vs. el guardado en `meta.json`), aplica la fusión descrita arriba, y si algo cambió reescribe el `.env.local` local y/o cifra + commitea + pushea la nueva versión al repo de secretos.
+
+### Desactivar
+
+Apaga el switch en Configuración, o borra `env_sync=1` de `~/.config/powerzoid-sync/config`. El repo local (`~/.local/share/powerzoid-sync/secrets-repo`) y la identidad no se tocan.
+
+---
+
 ## Resolución de problemas
 
 ### El daemon no responde
@@ -175,6 +230,16 @@ ssh -T git@github.com
 # Respuesta esperada: Hi ChristianLeal1978! You've successfully authenticated...
 ```
 
+### `env-sync: no se pudo descifrar <proyecto>.env.local.age`
+
+La identidad `age` de este equipo (`~/.config/powerzoid-sync/age-identity.txt`) no es la misma que la usada para cifrar ese archivo. Copia la identidad correcta desde el equipo que la generó (ver [Secretos](#secretos-envlocal-entre-equipos)) — no se puede recuperar el contenido sin ella.
+
+### `env-sync: falta instalar 'age'`
+
+```bash
+sudo dnf install age
+```
+
 ---
 
 ## Gestión del daemon
@@ -212,6 +277,7 @@ La config (`~/.config/powerzoid-sync/config`) y los logs se conservan por seguri
 - Python 3 (incluido en Fedora)
 - SSH configurado con GitHub (`~/.ssh/id_ed25519` registrada en GitHub)
 - GNOME Keyring activo (incluido en Fedora + GNOME por defecto)
+- `age` (`sudo dnf install age`) — solo si usas la sincronización de `.env.local`
 
 ---
 
